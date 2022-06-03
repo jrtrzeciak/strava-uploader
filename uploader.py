@@ -10,6 +10,8 @@ import time
 from datetime import datetime, timedelta
 import logging
 import sys
+import requests
+import math
 
 logger = None
 
@@ -23,30 +25,12 @@ logger = None
 #   (a) set an environment variable `STRAVA_UPLOADER_TOKEN` or;
 #   (b) replace `None` below with the token in quote marks, e.g. access_token = 'token'
 #####################################
-access_token = None
+access_token = '09f014a4f61dd1c7c5d107a6fcb8a9d2f72e7b4c'
 
-cardio_file = 'cardioActivities.csv'
+cardio_file = 'concept2-season-2010.csv'
 
 archive_dir = 'archive'
 skip_dir = 'skipped'
-
-# This list can be expanded
-# @see https://developers.strava.com/docs/uploads/#upload-an-activity
-# @see https://github.com/hozn/stravalib/blob/master/stravalib/model.py#L723
-activity_translations = {
-	'running': 'run',
-	'cycling': 'ride',
-	'mountain biking': 'ride',
-	'hiking': 'hike',
-	'walking': 'walk',
-	'swimming': 'swim',
-	'circuit training': 'workout',
-	'elliptical': 'elliptical',
-	'other': 'workout',
-	'pilates': 'workout',
-	'rowing': 'rowing',
-	'strength training': 'weighttraining'
-}
 
 def set_up_logger():
 	global logger
@@ -149,18 +133,19 @@ def increment_activity_counter(counter):
 	counter += 1
 	return counter
 
-def upload_gpx(client, gpxfile, strava_activity_type, notes):
-	if not os.path.isfile(gpxfile):
-		logger.warning("No file found for " + gpxfile + "!")
+def upload_fit(client, fitfile, strava_activity_type, notes, description, activity_id):
+	if not os.path.isfile(fitfile):
+		logger.warning("No file found for " + fitfile + "!")
 		return False
 
-	logger.debug("Uploading " + gpxfile)
+	logger.debug("Uploading " + fitfile)
 
 	for i in range(2):
 		try:
 			upload = client.upload_activity(
-				activity_file = open(gpxfile,'r'),
-				data_type = 'gpx',
+				activity_file = open(fitfile,'rb'),
+				name = description + " (C2 Log: " + activity_id + ")",
+				data_type = 'fit',
 				private = False,
 				description = notes,
 				activity_type = strava_activity_type
@@ -196,8 +181,8 @@ def upload_gpx(client, gpxfile, strava_activity_type, notes):
 			errStr = str(err)
 			# deal with duplicate type of error, if duplicate then continue with next file, else stop
 			if errStr.find('duplicate of activity'):
-				archive_file(gpxfile)
-				logger.debug("Duplicate File " + gpxfile)
+				archive_file(fitfile)
+				logger.debug("Duplicate File " + fitfile)
 				return True
 			else:
 				logger.error("Another ActivityUploadFailed error: {}".format(err))
@@ -210,8 +195,8 @@ def upload_gpx(client, gpxfile, strava_activity_type, notes):
 			exit(1)
 		break
 
-	logger.info("Uploaded " + gpxfile + " - Activity id: " + str(upResult.id))
-	archive_file(gpxfile)
+	logger.info("Uploaded " + fitfile + " - Activity id: " + str(upResult.id))
+	archive_file(fitfile)
 	return True
 
 # designates part of day for name assignment, matching Strava convention for GPS activities
@@ -254,13 +239,13 @@ def activity_exists(client, activity_name, start_time):
 
 	return False
 
-def create_activity(client, activity_id, duration, distance, start_time, strava_activity_type, notes):
+def create_activity(client, description, activity_id, duration, distance, start_time, strava_activity_type, notes):
 	# convert to total time in seconds
-	duration = duration_calc(duration)
+	#duration = duration_calc(duration)
 
-	day_part = strava_day_converstion(start_time.hour)
+	#day_part = strava_day_converstion(start_time.hour)
 
-	activity_name = day_part + " " + strava_activity_type + " (Manual)"
+	activity_name = description + " (C2 Log: " + activity_id + ")"
 
 	# Check to ensure the manual activity has not already been created
 	if activity_exists(client, activity_name, start_time):
@@ -269,22 +254,29 @@ def create_activity(client, activity_id, duration, distance, start_time, strava_
 
 	logger.info("Manually uploading [" + activity_id + "]:[" + activity_name + "]")
 
-	try:
-		upload = client.create_activity(
-			name = activity_name,
-			start_date_local = start_time,
-			elapsed_time = duration,
-			distance = distance,
-			description = notes,
-			activity_type = strava_activity_type
-		)
+	for i in range(2):
+		try:
+			upload = client.create_activity(
+				name = activity_name,
+				start_date_local = start_time,
+				elapsed_time = duration,
+				distance = distance,
+				description = notes,
+				activity_type = strava_activity_type
+			)
 
-		logger.debug("Manually created " + activity_id)
-		return True
-
-	except ConnectionError as err:
-		logger.error("No Internet connection: {}".format(err))
-		exit(1)
+			logger.debug("Manually created " + activity_id)
+			return True
+		except exc.RateLimitExceeded as err:
+			if i > 0:
+				logger.error("Daily Rate limit exceeded - exiting program")
+				exit(1)
+			logger.warning("Rate limit exceeded in uploading - pausing uploads for 15 minutes to avoid rate-limit")
+			time.sleep(900)
+			continue
+		except ConnectionError as err:
+			logger.error("No Internet connection: {}".format(err))
+			exit(1)
 
 def miles_to_meters(miles):
 	return float(miles) * 1609.344
@@ -296,7 +288,6 @@ def main():
 	set_up_logger()
 
 	cardio_file = get_cardio_file()
-
 	client = get_strava_client()
 
 	logger.debug('Connecting to Strava')
@@ -314,49 +305,60 @@ def main():
 
 	logger.info("Now authenticated for " + athlete.firstname + " " + athlete.lastname)
 
+	# Log into Concept2 log.
+	c2_login = {"username":"jrtrzeciak", "password":"password"}
+	c2_url = "https://log.concept2.com/login"
+
+	c2_session = requests.Session()
+	c2_response = c2_session.post(c2_url,data=c2_login)
+
 	# We open the cardioactivities CSV file and start reading through it
 	with cardio_file as csvfile:
 		activities = csv.DictReader(csvfile)
 		activity_counter = 0
 		completed_activities = []
-		distance_convertor = None
-		distance_key = None
-
-		if 'Distance (mi)' in activities.fieldnames:
-			distance_key = 'Distance (mi)'
-			distance_convertor = miles_to_meters
-
-		if 'Distance (km)' in activities.fieldnames:
-			distance_key = 'Distance (km)'
-			distance_convertor = km_to_meters
+		completed_dates = []
 
 		for row in activities:
-			# if there is a gpx file listed, find it and upload it
-			if ".gpx" in row['GPX File']:
-				gpxfile = row['GPX File']
-				strava_activity_type = activity_translator(str(row['Type']))
+			# Check if a fit file exists for activity
+			activity_id = row['Log ID']
+			fit_url = 'https://log.concept2.com/profile/404584/log/' + activity_id + '/export/fit'
+			fit_response = requests.get(fit_url, cookies=c2_session.cookies)
+
+			# if there is a successful response to request for fit file, upload it
+			if fit_response.status_code == 200:
+				fit_file = activity_id + '.fit'
+				with open(fit_file, 'wb') as f:
+					f.write(fit_response.content)
+				
+				strava_activity_type = 'rowing'
+				description = row['Description']
 
 				if strava_activity_type is not None:
-					if upload_gpx(client, gpxfile, strava_activity_type, row['Notes']):
+					if upload_fit(client, fit_file, strava_activity_type, row['Comments'], description, activity_id):
 						activity_counter = increment_activity_counter(activity_counter)
 				else:
-					logger.info('Invalid activity type ' + str(row['Type']) + ', skipping file ' + gpxfile)
-					skip_file(gpxfile)
+					logger.info('Invalid activity type ' + str(row['Type']) + ', skipping file ' + fit_file)
+					skip_file(fit_file)
 
-			# if no gpx file, upload the data from the CSV
+			# if no fit file, upload the data from the CSV
 			else:
-				activity_id = row['Activity Id']
+				activity_id = row['Log ID']
 
 				if activity_id not in completed_activities:
-					duration = row['Duration']
-					distance = distance_convertor(row[distance_key])
+					description = row['Description']
+					duration = int(math.ceil(float(row['Work Time (Seconds)'])))
+					distance = row['Work Distance']
 					start_time = datetime.strptime(str(row['Date']), "%Y-%m-%d %H:%M:%S")
-					strava_activity_type = activity_translator(str(row['Type']))
-					notes = row['Notes']
+					while start_time in completed_dates:
+						start_time = start_time + timedelta(minutes=1)
+					strava_activity_type = 'rowing'
+					notes = row['Comments']
 
 					if strava_activity_type is not None:
-						if create_activity(client, activity_id, duration, distance, start_time, strava_activity_type, notes):
+						if create_activity(client, description, activity_id, duration, distance, start_time, strava_activity_type, notes):
 							completed_activities.append(activity_id)
+							completed_dates.append(start_time)
 							activity_counter = increment_activity_counter(activity_counter)
 					else:
 						logger.info('Invalid activity type ' + str(row['Type']) + ', skipping')
